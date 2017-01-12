@@ -203,7 +203,15 @@ Gini <- function(x){
 
 
 Tau <- function(x){
-  # write function for Tau index/specificity
+  # calculate specificity index over vector/expression profile
+  max_x <- max(x)
+  max_I <- 1 - (x/max_x)
+  numerator <- sum(max_I)
+  denominator <- length(x)
+  
+  tau <- numerator/denominator
+  
+  return(tau)
 }
 
 
@@ -217,6 +225,10 @@ euclid_norm <- function(vector){
   return(vector/norm)
 }
 
+
+binary_convert <- function(x, threshold){
+  return(as.integer(x >= threshold))
+}
 
 #################################
 ## Gene contribution functions ##
@@ -329,4 +341,30 @@ geneClassGO <- function(test.genes, back.genes,
   GO.sig.all$description <- do.call(rbind, id2name[GO.sig.all$category])
   
   return(GO.sig.all)
+}
+
+####################################################
+## TF enrichment testing in tissue enriched mTECs ##
+####################################################
+
+tf.fisher_test <- function(tf.genes, tissue.genes, cell.genes, all.genes){
+  # test whether there is an enrichment/depletion of TF genes
+  # in the tissue-specific genes in each mTEC:tissue pair
+  Mg <- cell.genes
+  Tg <- tf.genes
+  Pg <- tissue.genes
+  
+  # calculate 2x2 contigency table
+  aF <- length(intersect(cell.genes, tf.genes))
+  bF <- length(setdiff(cell.genes, tf.genes))
+  cF <- length(setdiff(tf.genes, cell.genes))
+  dF <- length(setdiff(setdiff(all.genes, cell.genes), tf.genes))
+  fish <- matrix(c(aF, bF, cF, dF), nrow=2, ncol=2)
+  fish.res <- fisher.test(fish)
+  fish.p <- fish.res$p.value
+  fish.or <- fish.res$estimate
+  fish.ci <- fish.res$conf.int
+  fish.vec <- c(fish.or, fish.ci, fish.p)
+  names(fish.vec) <- c("OR", "LCI", "UCI", "P")
+  return(fish.vec)
 }
