@@ -1,6 +1,15 @@
 #########################################
 ### functions for single cell RNA seq ###
 #########################################
+cell_distance <- function(dataframe){
+  # calculate cell differences within the defined dataframe
+  # assumes all cells will be used, genes in rows, cells in columns
+  rho <- cor(dataframe, method="spearman")
+  d.rho <- sqrt((1 - rho)/2)
+  
+  return(d.rho)
+}
+
 
 find_hvg <- function(dataframe, plot=FALSE, p.threshold=1e-2){
   # define a set of highly variable gene for the GFP+ and GFP- separately
@@ -68,6 +77,39 @@ create_pseudotime <- function(dataframe, geneset, k, n_eigs, distance, dcs){
   return(dc.map[, 1:dcs])
 }
 
+
+window_cell_distance <- function(dataframe, pseudotime,
+                                 direction="reverse"){
+  # return a dataframe of windows with the cell-to-cell distances within each window
+  n.cells <- dim(dataframe)[2]
+  window.size <- round(n.cells * 0.02)
+  step.size <- round(window.size/2)
+  n.windows <- round(n.cells/step.size)
+  
+  pseudotime.order <- colnames(dataframe)[order(pseudotime, decreasing=FALSE)]
+  
+  cell.dist <- list()
+  cell.start <- 1
+  cell.end <- window.size
+  
+  for(i in 1:n.windows){
+    if((cell.end - step.size) < n.cells){
+      window.cells <- pseudotime.order[cell.start:cell.end][!is.na(pseudotime.order[cell.start:cell.end])]
+      window.data <- dataframe[, window.cells]
+      window.dist <- cell_distance(window.data)
+    
+      cell.start <- cell.start + step.size
+      cell.end <- cell.end + step.size
+      cell.dist[[i]] <- window.dist[upper.tri(window.dist, diag=FALSE)]
+    }
+  }
+  
+  dist.df <- melt(do.call(cbind, cell.dist))
+  colnames(dist.df) <- c("Num", "Window", "Dist")
+  return(dist.df)
+}
+
+
 expression_rate <- function(dataframe, pseudotime,
                             tolerance=1e-5,
                             direction="reverse"){
@@ -88,6 +130,7 @@ expression_rate <- function(dataframe, pseudotime,
   delta2.list <- list()
   genes.av <- list()
   genes.sd <- list()
+  cell.dist <- list()
   
   for(k in 1:n.genes){
     gene.data <- dataframe[k, ]
@@ -161,6 +204,7 @@ expression_rate <- function(dataframe, pseudotime,
   sd.df <- data.frame(do.call(rbind, genes.sd))
   rownames(sd.df) <- rownames(dataframe)
   
+
   out.list <- list("fit"=fits.df,
                    "derive1"=delta1.df,
                    "derive2"=delta2.df,
