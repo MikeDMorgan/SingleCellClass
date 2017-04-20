@@ -152,6 +152,23 @@ euclidDist <- function(x, y){
   sqrt(sum((x - y) ** 2))
 }
 
+cosine_distance <- function(dataframe){
+  # calculate all pairwise cosine distances on a matrix/dataframe
+  # calculate column-column
+  cos.list <- list()
+  for(x in 1:dim(dataframe)[2]){
+    col.vec <- dataframe[, x]
+    print(length(col.vec))
+    cos.dist <- apply(data.frame, 2,
+                      FUN=function(D) cosine(D, col.vec))
+    cos.list[[x]] <- cos.dist
+  }
+  out.mat <- as.data.frame(do.call(rbind, cos.list))
+  colnames(out.mat) <- colnames(dataframe)
+  rownames(out.mat) <- rownames(dataframe)
+  return(out.mat)
+}
+
 
 proportional_distance <- function(train, testInstance,
                                   proportional=TRUE){
@@ -184,6 +201,64 @@ proportionalDistance <- function(train, test, cl,
 ####################################
 ## Equality/specificity functions ##
 ####################################
+Jaccard <- function(dataframe, binary=TRUE){
+  # apply the Jaccard coefficient to each pair of
+  # rows in a matrix
+  # sanity check that diagonals == 1
+  
+  # there is a linear algebraic calculation for Jaccard
+  # XTX = A
+  # (notX)T(notX) = D
+  # Jaccard = A/(n-D)
+  # two transposes, then some element-wise operations.
+  if(binary == TRUE){
+    dat <- as.matrix(dataframe)
+    n <- dim(dataframe)[1]
+    A <- t(dat) %*% dat
+    notX <- abs(dat - 1)
+    D <- t(notX) %*% notX
+    
+    jac.df <- data.frame(A/(n-D))
+  }
+  else{
+    n.rows <- dim(dataframe)[1]
+    jac.df <- data.frame(apply(dataframe, 1,
+                               FUN=function(Q) row_jaccard(x=dataframe,
+                                                           row=Q,
+                                                           binary=binary)))
+  }
+  return(jac.df)
+}
+
+
+row_jaccard <- function(x, row, binary=TRUE){
+  jac.row <- apply(x, 1,
+                   FUN=function(C) jaccard_coef(x=C,
+                                                y=row,
+                                                binary=binary))
+  return(jac.row)
+}
+
+jaccard_coef <- function(x, y, binary=TRUE){
+  # check if the data are binary vectors
+  # if not then assume category labels so use set operations
+  
+  if(binary == TRUE){
+    numerator <- sum(x == 1 & y == 1)
+    denom <- sum(sum(x == 1 & y == 1),
+                 sum(x == 1 & y == 0),
+                 sum(x == 0 & y == 1))
+  }
+  else{
+    numerator <- length(intersect(x, y))
+    denom <- sum(length(intersect(x, y)),
+                 length(setdiff(x, y)),
+                 length(setdiff(y, x)))
+    
+  }
+  jac <- numerator/denom
+  return(jac)
+}
 
 Gini <- function(x){
   # absolute differences between each pair of points
@@ -228,6 +303,14 @@ euclid_norm <- function(vector){
 
 binary_convert <- function(x, threshold){
   return(as.integer(x >= threshold))
+}
+
+ternary_convert <- function(x, threshold){
+  bx <- x
+  bx[x <= threshold] <- -1
+  bx[is.na(x)] <- 0
+  bx[x > threshold] <- 1
+  return(bx)
 }
 
 #################################
@@ -346,6 +429,35 @@ geneClassGO <- function(test.genes, back.genes,
 ####################################################
 ## TF enrichment testing in tissue enriched mTECs ##
 ####################################################
+test_geneset_overlap <- function(geneset, genes.list, tissue.genes,
+                                 tissue.bin){
+  geneset.store <- list()
+  for(i in 1:length(genes.list)){
+    if(length(genes.list[[i]]) > 1){
+      cell.tis <- names(genes.list[[i]])
+      for(tis in 1:length(cell.tis)){
+        en.tis <- cell.tis[[tis]]
+        shared.genes <- genes.list[[i]][[en.tis]]
+        tis.genes <- tissue.genes[as.logical(tra.bin[, en.tis])]
+        cell.geneset <- intersect(shared.genes, geneset)
+        tis.geneset <- intersect(tis.genes, geneset)
+        geneset.store[["Multiple"]] <- c(geneset.store[["Multiple"]],
+                                        length(cell.geneset)/length(tis.geneset))
+      }
+    }
+  else{
+    cell.tis <- names(genes.list[[i]])
+    shared.genes <- genes.list[[i]][[cell.tis]]
+    tis.genes <- tissue.genes[as.logical(tra.bin[, cell.tis])]
+    cell.geneset <- intersect(shared.genes, geneset)
+    tis.geneset <- intersect(tis.genes, geneset)
+    geneset.store[["Single"]] <- c(geneset.store[["Single"]],
+                                  length(cell.geneset)/length(tis.geneset))
+  }
+  }
+  return(geneset.store)
+}
+
 
 tf.fisher_test <- function(tf.genes, tissue.genes, cell.genes, all.genes){
   # test whether there is an enrichment/depletion of TF genes
@@ -367,4 +479,20 @@ tf.fisher_test <- function(tf.genes, tissue.genes, cell.genes, all.genes){
   fish.vec <- c(fish.or, fish.ci, fish.p)
   names(fish.vec) <- c("OR", "LCI", "UCI", "P")
   return(fish.vec)
+}
+
+adjacency.matrix <- function(geneset.1, geneset.2){
+  # calculate an adjacency matrix as the proportion of times
+  # two genes are found together.  If there is only one group of
+  # genes then set geneset.1 and geneset.2 to the same matrix
+  # of genes X cells
+  n.cells <- dim(geneset.1)[2]
+  gene.list <- list()
+  for(k in 1:(dim(geneset.1)[1])){
+    vec <- geneset.1[k, ]
+    gene.list[[k]] <- rowSums(geneset.2 * t(vec))
+  }
+  gene.mat <- as.data.frame(do.call(rbind, gene.list))/n.cells
+  rownames(gene.mat) <- rownames(geneset.1)
+  return(gene.mat)
 }
