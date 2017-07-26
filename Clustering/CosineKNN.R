@@ -159,13 +159,13 @@ cosine_distance <- function(dataframe){
   for(x in 1:dim(dataframe)[2]){
     col.vec <- dataframe[, x]
     print(length(col.vec))
-    cos.dist <- apply(data.frame, 2,
+    cos.dist <- apply(dataframe, 2,
                       FUN=function(D) cosine(D, col.vec))
     cos.list[[x]] <- cos.dist
   }
   out.mat <- as.data.frame(do.call(rbind, cos.list))
   colnames(out.mat) <- colnames(dataframe)
-  rownames(out.mat) <- rownames(dataframe)
+  rownames(out.mat) <- colnames(dataframe)
   return(out.mat)
 }
 

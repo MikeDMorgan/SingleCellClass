@@ -1,6 +1,110 @@
 #########################################
 ### functions for single cell RNA seq ###
 #########################################
+correlation_cluster <- function(dataframe, module.size=30, linkage='average',
+                                measure=spearman, dimension='rows'){
+  # use Spearman/Pearson correlation to cluster cells by hierarchical clustering
+  if(dimension == 'rows'){
+    data.cor <- cor(t(dataframe), method=measure)
+  }
+  else{
+    data.cor <- cor(dataframe, method=measure)
+  }
+  data.cor[is.na(data.cor)] <- 0
+  spearman.dist <- as.dist(1 - data.cor)
+  spearman.tree <- flashClust(spearman.dist, method=linkage)
+  #plot(spearman.tree)
+  spearman.cut <- cutreeDynamicTree(dendro=spearman.tree, minModuleSize=module.size,
+                                    deepSplit=F)
+  spearman.cols <- labels2colors(spearman.cut)
+  data.cluster <- data.frame(cbind(colnames(data.cor), spearman.cols))
+  colnames(data.cluster) <- c("Sample", "Cluster")
+  
+  return(data.cluster)
+}
+
+
+pca_wrapper <- function(dataframe){
+  # return a list with the original prcomp results
+  # and a convenient dataframe to work from directly
+  pca_res <- list()
+  # need to remove all zero rows if still included
+  dataframe <- dataframe[, !duplicated(t(dataframe))]
+  dataframe <- dataframe[!rowSums(dataframe) == 0,]
+  data.pca <- prcomp(t(dataframe), scale=TRUE, center=TRUE)
+  data.pcs <- data.frame(data.pca$x)
+  colnames(data.pcs) <- paste0("PC", 1:dim(data.pcs)[2])
+  data.pcs$Sample <- colnames(dataframe)
+  pca_res[["DF"]] <- data.pcs
+  pca_res[["PCA"]] <- data.pca
+  
+  return(pca_res)
+}
+
+tsne_wrapper <- function(dataframe, perplexity=30, is.dist=FALSE){
+  require(Rtsne)
+  set.seed(42)
+  if(is.dist){
+    data.tsne <- Rtsne(t(dataframe),
+                       perplexity=perplexity, is_distance=is.dist, pca=FALSE)
+    sample.names <- labels(dataframe)
+    
+  }
+  else {
+    dataframe <- dataframe[, !duplicated(t(dataframe))]
+    data.tsne <- Rtsne(t(dataframe), perplexity=perplexity)
+    sample.names <- colnames(dataframe)
+  }
+  data.map <- data.frame(data.tsne$Y)  
+  colnames(data.map) <- c("Dim1", "Dim2")
+  data.map$Sample <- sample.names
+  
+  return(data.map)
+}
+
+size_factor_normalize <- function(dataframe, cell.sparse=0.95, gene.sparse=0.99,
+                                  cluster.size=40){
+  # take an input gene X cell (barcode) dataframe of
+  # read counts/UMIs
+  # output the cell-specific size factor normalized log2 expression values
+  
+  n.cells <- dim(dataframe)[2]
+  n.genes <- dim(dataframe)[1]
+  
+  gene_sparsity <- (apply(dataframe == 0, MARGIN = 1, sum)/n.cells)
+  keep_genes <- gene_sparsity < gene.sparse
+  #dim(exprs(SIGAD8.10x.hg19)[keep_genes, ])
+  data.nz <- dataframe[keep_genes, ]
+  
+  # remove a cell with very low counts, order of magnitude lower than all others
+  cell_sparsity <- apply(data.nz == 0, MARGIN = 2, sum)/dim(data.nz)[1]
+  keep_cells <- cell_sparsity < cell.sparse
+  #dim(pdx.nz[, keep_cells])
+  data.nz <- data.nz[, keep_cells]
+  
+  # let's try to use the deconvolution normalisation approach on these data
+  sce <- newSCESet(countData=data.nz)
+  sce <- calculateQCMetrics(sce)
+  clusters <- quickCluster(sce, min.size=cluster.size)
+  max.size <- floor(cluster.size/2)
+  
+  # change the window size in 10% increments
+  size.inc <- max.size * 0.1
+  sce <- computeSumFactors(sce, sizes=c(max.size - (3 * size.inc),
+                                        max.size - (2 * size.inc),
+                                        max.size - size.inc,
+                                        max.size), positive=T,
+                           assay='counts', clusters=clusters)
+  summary(sizeFactors(sce))
+  sce <- normalise(sce)
+  
+  sf.norm <- as.data.frame(exprs(sce))
+  sf.norm$gene_id <- rownames(sf.norm)
+  
+  return(sf.norm)
+}
+
+
 cell_distance <- function(dataframe){
   # calculate cell differences within the defined dataframe
   # assumes all cells will be used, genes in rows, cells in columns
@@ -13,6 +117,9 @@ cell_distance <- function(dataframe){
 
 find_hvg <- function(dataframe, plot=FALSE, p.threshold=1e-2){
   # define a set of highly variable gene for the GFP+ and GFP- separately
+  require(MASS)
+  require(limSolve)
+  require(statmod)
   means <- rowMeans(dataframe, na.rm = T)
   vars <- apply(dataframe, 1, var, na.rm=T)
   cv2 <- vars/(means^2)
@@ -20,10 +127,14 @@ find_hvg <- function(dataframe, plot=FALSE, p.threshold=1e-2){
   minMeanForFit <- unname(quantile(means[which(cv2 > 0.2)], 0.8))
   
   # select genes with mean value greater than min value for fitting
-  useForFit <- 1/means == 0
+  # remove values with 1/means == infinite
+  recip.means <- 1/means
+  recip.means[is.infinite(recip.means)] <- 0
   
+  useForFit <- recip.means <= 1
+
   # fit with a gamma-distributed GLM
-  fit <- glmgam.fit(cbind(a0 = 1, a1tilde=1/means[!useForFit]), cv2[!useForFit])
+  fit <- glmgam.fit(cbind(a0 = 1, a1tilde=recip.means[!useForFit]), cv2[!useForFit])
   
   # calculate % variance explained by the model fit
   resid.var <- var(fitted.values(fit) - cv2[!useForFit])
@@ -112,13 +223,15 @@ window_cell_distance <- function(dataframe, pseudotime,
 
 expression_rate <- function(dataframe, pseudotime,
                             tolerance=1e-5,
-                            direction="reverse"){
+                            direction="reverse",
+                            window.prop=0.02){
   # return a list of dataframes containing GAM fit, first and second order derivatives
   # pseudotime is a vector of values corresponding to an ordering along a trajectory
   # values should be in the same order as the columns of dataframe
+  # extend to include residual CV^2
   
   n.cells <- dim(dataframe)[2]
-  window.size <- round(n.cells * 0.02)
+  window.size <- round(n.cells * window.prop)
   step.size <- round(window.size/2)
   n.windows <- round(n.cells/step.size)
   
@@ -130,25 +243,30 @@ expression_rate <- function(dataframe, pseudotime,
   delta2.list <- list()
   genes.av <- list()
   genes.sd <- list()
+  genes.cv <- list()
   cell.dist <- list()
   
   for(k in 1:n.genes){
     gene.data <- dataframe[k, ]
     av.list <- list()
     sd.list <- list()
+    cv.list <- list()
     cell.start <- 1
     cell.end <- window.size
     
     for(i in 1:n.windows){
       if((cell.end - step.size) < n.cells){
-        window.cells <- pseudotime.order[cell.start:cell.end]
+        window.cells <- na.omit(pseudotime.order[cell.start:cell.end])
         window.data <- as.numeric(gene.data[window.cells])
         window.av <- mean(window.data)
         window.sd <- sd(window.data)
+        window.var <- var(window.data)
+        window.cv2 <- window.var/(window.av**2)
         cell.start <- cell.start + step.size
         cell.end <- cell.end + step.size
         av.list[[i]] <- window.av
         sd.list[[i]] <- window.sd
+        cv.list[[i]] <- window.cv2
       }
     }
     
@@ -187,6 +305,7 @@ expression_rate <- function(dataframe, pseudotime,
     delta2.list[[k]] <- fd_d2[, 1]
     genes.av[[k]] <- unlist(av.list)
     genes.sd[[k]] <- unlist(sd.list)
+    genes.cv[[k]] <- unlist(cv.list)
   }
   
   fits.df <- data.frame(do.call(rbind, gam.list))
@@ -204,15 +323,42 @@ expression_rate <- function(dataframe, pseudotime,
   sd.df <- data.frame(do.call(rbind, genes.sd))
   rownames(sd.df) <- rownames(dataframe)
   
-
+  cv.df <- data.frame(do.call(rbind, genes.cv))
+  rownames(cv.df) <- rownames(dataframe)
+  
   out.list <- list("fit"=fits.df,
                    "derive1"=delta1.df,
                    "derive2"=delta2.df,
                    "average"=av.df,
-                   "sigma"=sd.df)
+                   "sigma"=sd.df,
+                   "cv2"=cv.df)
   return(out.list)
 }
 
+
+window_cv <- function(cv.df, av.df){
+  
+  # get residual CV^2 after regressing out mean-CV^2 trend
+  windows <- c(1:dim(cv.df)[2])
+  window.resid <- list()
+  for(k in windows){
+    # find the minimum mean prior to fitting
+    minMeanForFit <- unname(quantile(av.df[, k][which(cv.df[, k] > 0.2)], 0.8))
+  
+    # select genes with mean value greater than min value for fitting
+    useForFit <- 1/av.df[, k] <= 0.05
+  
+    # fit with a gamma-distributed GLM
+    fit <- glmgam.fit(cbind(a0 = 1, a1tilde=1/av.df[, k][!useForFit]), 
+                      cv.df[, k][!useForFit])
+  
+    window.resid[[k]] <- fitted.values(fit) - cv.df[, k][!useForFit]
+    names(window.resid[[k]]) <- rownames(av.df[!useForFit, ])
+  }
+  
+  resid.cv <- data.frame(do.call(cbind, window.resid))
+  return(resid.cv)
+}
 
 .temp_cor <- function(x, y){
   n.time <- length(x)
